@@ -1,0 +1,198 @@
+{
+    "Comment": "Analysis Pipeline — orchestrates security scanning, SAST analysis, human approval, and certificate generation",
+    "StartAt": "CheckSemanticCache",
+    "States": {
+        "CheckSemanticCache": {
+            "Type": "Task",
+            "Comment": "Check ElastiCache for a semantically similar prior result. Skip Batch if cache hit.",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "${CheckSemanticCacheFunctionArn}",
+                "Payload.$": "$"
+            },
+            "ResultSelector": {
+                "cacheHit.$": "$.Payload.cacheHit",
+                "cachedResult.$": "$.Payload.cachedResult"
+            },
+            "ResultPath": "$.cache",
+            "Next": "CacheHit?",
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error",
+                    "Next": "RunAnalysis"
+                }
+            ]
+        },
+        "CacheHit?": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.cache.cacheHit",
+                    "BooleanEquals": true,
+                    "Next": "WaitForHumanApproval"
+                }
+            ],
+            "Default": "RunAnalysis"
+        },
+        "RunAnalysis": {
+            "Type": "Task",
+            "Comment": "Submit an AWS Batch job (Fargate Spot) running the sast-analyzer container.",
+            "Resource": "arn:aws:states:::batch:submitJob.sync",
+            "Parameters": {
+                "JobName.$": "States.Format('sast-{}', $.analysisId)",
+                "JobQueue": "${BatchJobQueueArn}",
+                "JobDefinition": "${BatchJobDefinitionArn}",
+                "ContainerOverrides": {
+                    "Environment": [
+                        {
+                            "Name": "ANALYSIS_ID",
+                            "Value.$": "$.analysisId"
+                        },
+                        {
+                            "Name": "S3_BUCKET",
+                            "Value.$": "$.s3Bucket"
+                        },
+                        {
+                            "Name": "S3_KEY",
+                            "Value.$": "$.s3Key"
+                        },
+                        {
+                            "Name": "TENANT_ID",
+                            "Value.$": "$.tenantId"
+                        },
+                        {
+                            "Name": "USER_ID",
+                            "Value.$": "$.userId"
+                        },
+                        {
+                            "Name": "S3_OUTPUT_BUCKET",
+                            "Value": "${OutputBucketName}"
+                        },
+                        {
+                            "Name": "DYNAMO_ANALYSES_TABLE",
+                            "Value": "${AnalysesTableName}"
+                        }
+                    ]
+                }
+            },
+            "ResultSelector": {
+                "jobId.$": "$.JobId",
+                "status.$": "$.Status"
+            },
+            "ResultPath": "$.batch",
+            "Next": "WaitForHumanApproval",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "Batch.BatchException",
+                        "States.TaskFailed"
+                    ],
+                    "IntervalSeconds": 30,
+                    "MaxAttempts": 2,
+                    "BackoffRate": 2
+                }
+            ],
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error",
+                    "Next": "AnalysisFailed"
+                }
+            ]
+        },
+        "WaitForHumanApproval": {
+            "Type": "Task",
+            "Comment": "Pause execution indefinitely. Resumed by the HITL approve/reject Lambda via SendTaskSuccess/SendTaskFailure.",
+            "Resource": "arn:aws:states:::lambda:invoke.waitForTaskToken",
+            "Parameters": {
+                "FunctionName": "${StoreTaskTokenFunctionArn}",
+                "Payload": {
+                    "analysisId.$": "$.analysisId",
+                    "tenantId.$": "$.tenantId",
+                    "taskToken.$": "$$.Task.Token",
+                    "batchResult.$": "$.batch"
+                }
+            },
+            "ResultPath": "$.approval",
+            "Next": "ApprovalDecision",
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "HumanRejection"
+                    ],
+                    "ResultPath": "$.rejectionError",
+                    "Next": "AnalysisRejected"
+                },
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error",
+                    "Next": "AnalysisFailed"
+                }
+            ]
+        },
+        "ApprovalDecision": {
+            "Type": "Choice",
+            "Choices": [
+                {
+                    "Variable": "$.approval.approved",
+                    "BooleanEquals": true,
+                    "Next": "GenerateCertificate"
+                }
+            ],
+            "Default": "AnalysisRejected"
+        },
+        "GenerateCertificate": {
+            "Type": "Task",
+            "Resource": "arn:aws:states:::lambda:invoke",
+            "Parameters": {
+                "FunctionName": "${CertificateGeneratorFunctionArn}",
+                "Payload.$": "$"
+            },
+            "ResultSelector": {
+                "certificateId.$": "$.Payload.certificateId",
+                "s3Key.$": "$.Payload.s3Key"
+            },
+            "ResultPath": "$.certificate",
+            "Next": "PipelineSucceeded",
+            "Retry": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "IntervalSeconds": 5,
+                    "MaxAttempts": 3,
+                    "BackoffRate": 2
+                }
+            ],
+            "Catch": [
+                {
+                    "ErrorEquals": [
+                        "States.ALL"
+                    ],
+                    "ResultPath": "$.error",
+                    "Next": "AnalysisFailed"
+                }
+            ]
+        },
+        "PipelineSucceeded": {
+            "Type": "Succeed"
+        },
+        "AnalysisRejected": {
+            "Type": "Fail",
+            "Error": "AnalysisRejected",
+            "Cause": "Human reviewer rejected the analysis"
+        },
+        "AnalysisFailed": {
+            "Type": "Fail",
+            "Error": "AnalysisFailed",
+            "Cause": "An error occurred during the analysis pipeline"
+        }
+    }
+}

@@ -1,0 +1,465 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Analysis Engine — API Gateway, Lambda, Step Functions, SQS, EventBridge, Aurora
+
+Parameters:
+  Environment:
+    Type: String
+    Default: production
+    AllowedValues: [production, staging, development]
+  Auth0Domain:
+    Type: String
+    NoEcho: false
+  Auth0Audience:
+    Type: String
+    NoEcho: false
+  StagingBucketName:
+    Type: String
+    Default: s3-staging-uploads
+  ProcessingBucketName:
+    Type: String
+    Default: s3-processing-uploads
+  QuarantineBucketName:
+    Type: String
+    Default: s3-quarantine
+  OutputBucketName:
+    Type: String
+    Default: s3-output-certificates
+  AnalysesTableName:
+    Type: String
+    Default: analyses
+  CertificatesTableName:
+    Type: String
+    Default: certificates
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+    Runtime: nodejs22.x
+    Architectures: [arm64]
+    Environment:
+      Variables:
+        NODE_ENV: !Ref Environment
+        LOG_LEVEL: info
+        AWS_REGION: !Ref AWS::Region
+        AUTH0_DOMAIN: !Ref Auth0Domain
+        AUTH0_AUDIENCE: !Ref Auth0Audience
+        S3_STAGING_BUCKET: !Ref StagingBucketName
+        S3_PROCESSING_BUCKET: !Ref ProcessingBucketName
+        S3_QUARANTINE_BUCKET: !Ref QuarantineBucketName
+        S3_OUTPUT_BUCKET: !Ref OutputBucketName
+        DYNAMO_ANALYSES_TABLE: !Ref AnalysesTableName
+        DYNAMO_CERTIFICATES_TABLE: !Ref CertificatesTableName
+        SQS_ANALYSIS_QUEUE_URL: !Ref AnalysisQueue
+        SFN_STATE_MACHINE_ARN: !Ref AnalysisPipeline
+        PRESIGNED_URL_TTL_UPLOAD: "900"
+        PRESIGNED_URL_TTL_DOWNLOAD: "60"
+
+Resources:
+
+  # ─── DynamoDB Tables ──────────────────────────────────────────────────────
+
+  AnalysesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Ref AnalysesTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+        - AttributeName: status
+          AttributeType: S
+        - AttributeName: createdAt
+          AttributeType: S
+        - AttributeName: analysisId
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: StatusIndex
+          KeySchema:
+            - AttributeName: status
+              KeyType: HASH
+            - AttributeName: createdAt
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+        - IndexName: AnalysisIdIndex
+          KeySchema:
+            - AttributeName: analysisId
+              KeyType: HASH
+          Projection:
+            ProjectionType: ALL
+
+  CertificatesTable:
+    Type: AWS::DynamoDB::Table
+    DeletionPolicy: Retain
+    Properties:
+      TableName: !Ref CertificatesTableName
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions:
+        - AttributeName: PK
+          AttributeType: S
+        - AttributeName: SK
+          AttributeType: S
+      KeySchema:
+        - AttributeName: PK
+          KeyType: HASH
+        - AttributeName: SK
+          KeyType: RANGE
+
+  StagingBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref StagingBucketName
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireStagingFiles
+            Status: Enabled
+            ExpirationInDays: 7
+
+  ProcessingBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref ProcessingBucketName
+      NotificationConfiguration:
+        EventBridgeConfiguration:
+          EventBridgeEnabled: true
+
+  QuarantineBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref QuarantineBucketName
+
+  OutputBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: !Ref OutputBucketName
+
+  # ─── SQS ───────────────────────────────────────────────────────────────────
+
+  AnalysisDeadLetterQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: analysis-dlq
+      MessageRetentionPeriod: 1209600  # 14 days
+
+  AnalysisQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: analysis-queue
+      VisibilityTimeout: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt AnalysisDeadLetterQueue.Arn
+        maxReceiveCount: 3
+
+  # ─── EventBridge Rule: s3-processing-uploads → SQS ────────────────────────
+
+  ProcessingBucketRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: Route s3-processing-uploads ObjectCreated events to SQS
+      EventPattern:
+        source: [aws.s3]
+        detail-type: [Object Created]
+        detail:
+          bucket:
+            name: [!Ref ProcessingBucketName]
+      Targets:
+        - Id: AnalysisQueueTarget
+          Arn: !GetAtt AnalysisQueue.Arn
+
+  AnalysisQueuePolicy:
+    Type: AWS::SQS::QueuePolicy
+    Properties:
+      Queues: [!Ref AnalysisQueue]
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sqs:SendMessage
+            Resource: !GetAtt AnalysisQueue.Arn
+
+  # ─── Step Functions ─────────────────────────────────────────────────────────
+
+  AnalysisPipeline:
+    Type: AWS::Serverless::StateMachine
+    Properties:
+      DefinitionUri: state-machine/analysis-pipeline.asl.json
+      DefinitionSubstitutions:
+        CheckSemanticCacheFunctionArn: !GetAtt CheckSemanticCacheFunction.Arn
+        StoreTaskTokenFunctionArn: !GetAtt StoreTaskTokenFunction.Arn
+        CertificateGeneratorFunctionArn: !GetAtt CertificateGeneratorFunction.Arn
+        BatchJobQueueArn: !Sub 'arn:aws:batch:${AWS::Region}:${AWS::AccountId}:job-queue/sast-analyzer'
+        BatchJobDefinitionArn: !Sub 'arn:aws:batch:${AWS::Region}:${AWS::AccountId}:job-definition/sast-analyzer'
+      Policies:
+        - LambdaInvokePolicy:
+            FunctionName: !Ref CheckSemanticCacheFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref StoreTaskTokenFunction
+        - LambdaInvokePolicy:
+            FunctionName: !Ref CertificateGeneratorFunction
+        - Statement:
+            - Effect: Allow
+              Action: [batch:SubmitJob, batch:DescribeJobs, batch:TerminateJob]
+              Resource: '*'
+            - Effect: Allow
+              Action: [events:PutTargets, events:PutRule, events:DescribeRule]
+              Resource: !Sub 'arn:aws:events:${AWS::Region}:${AWS::AccountId}:rule/StepFunctionsGetEventsForBatchJobsRule'
+
+  # ─── API Gateway (HTTP API) ─────────────────────────────────────────────────
+
+  AnalysisApi:
+    Type: AWS::Serverless::HttpApi
+    Properties:
+      StageName: !Ref Environment
+      Auth:
+        DefaultAuthorizer: LambdaAuthorizer
+        Authorizers:
+          LambdaAuthorizer:
+            AuthorizerPayloadFormatVersion: "2.0"
+            EnableSimpleResponses: true
+            FunctionArn: !GetAtt AuthorizerFunction.Arn
+            Identity:
+              Headers: [Authorization]
+      CorsConfiguration:
+        AllowOrigins: ['*']
+        AllowHeaders: [Authorization, Content-Type]
+        AllowMethods: [GET, POST, DELETE, OPTIONS]
+
+  # ─── Lambda Functions ───────────────────────────────────────────────────────
+
+  AuthorizerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers/authorizer.handler
+      CodeUri: dist/
+      Description: JWT authorizer — validates Auth0 tokens
+
+  UploadPresignedUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers/upload-presigned-url.handler
+      CodeUri: dist/
+      Description: Generate presigned S3 PUT URL
+      Policies:
+        - S3WritePolicy:
+            BucketName: !Ref StagingBucketName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AnalysesTableName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CertificatesTableName
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AnalysisApi
+            Path: /uploads/presigned-url
+            Method: POST
+
+  UploadCompleteFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers/upload-complete.handler
+      CodeUri: dist/
+      Description: Notify backend of completed upload, enqueue to SQS
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AnalysesTableName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CertificatesTableName
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt AnalysisQueue.QueueName
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AnalysisApi
+            Path: /uploads/complete
+            Method: POST
+
+  AnalysisStatusFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers/analysis-status.handler
+      CodeUri: dist/
+      Description: Poll analysis status
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AnalysesTableName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CertificatesTableName
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AnalysisApi
+            Path: /analysis-status/{id}
+            Method: GET
+
+  CertificateDownloadFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers/certificate-download.handler
+      CodeUri: dist/
+      Description: Generate presigned S3 GET URL for certificate PDF
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AnalysesTableName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CertificatesTableName
+        - S3ReadPolicy:
+            BucketName: !Ref OutputBucketName
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AnalysisApi
+            Path: /certificates/{id}/download
+            Method: GET
+
+  ApproveAnalysisFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers/hitl-approval.approveHandler
+      CodeUri: dist/
+      Description: Admin — approve analysis, SendTaskSuccess to Step Functions
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AnalysesTableName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CertificatesTableName
+        - Statement:
+            - Effect: Allow
+              Action: [states:SendTaskSuccess, states:SendTaskFailure]
+              Resource: !Ref AnalysisPipeline
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AnalysisApi
+            Path: /analyses/{id}/approve
+            Method: POST
+
+  RejectAnalysisFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers/hitl-approval.rejectHandler
+      CodeUri: dist/
+      Description: Admin — reject analysis, SendTaskFailure to Step Functions
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AnalysesTableName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CertificatesTableName
+        - Statement:
+            - Effect: Allow
+              Action: [states:SendTaskSuccess, states:SendTaskFailure]
+              Resource: !Ref AnalysisPipeline
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AnalysisApi
+            Path: /analyses/{id}/reject
+            Method: POST
+
+  SqsConsumerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers/sqs-consumer.handler
+      CodeUri: dist/
+      Timeout: 60
+      Description: Dequeue analysis messages and start Step Functions executions
+      Policies:
+        - Statement:
+            - Effect: Allow
+              Action: states:StartExecution
+              Resource: !Ref AnalysisPipeline
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AnalysesTableName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CertificatesTableName
+      Events:
+        SQSTrigger:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt AnalysisQueue.Arn
+            BatchSize: 1
+            FunctionResponseTypes: [ReportBatchItemFailures]
+
+  StoreTaskTokenFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers/store-task-token.handler
+      CodeUri: dist/
+      Description: Store Step Functions task token in DynamoDB during HITL wait
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AnalysesTableName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CertificatesTableName
+
+  CheckSemanticCacheFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers/check-semantic-cache.handler
+      CodeUri: dist/
+      Description: Check ElastiCache for semantically similar prior analysis result
+      # VpcConfig required to reach ElastiCache — set in samconfig.toml or via parameter
+      Timeout: 10
+
+  CertificateGeneratorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers/certificate-generator.handler
+      CodeUri: dist/
+      MemorySize: 512
+      Timeout: 60
+      Description: Generate PDF certificate and upload to S3 output bucket
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AnalysesTableName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CertificatesTableName
+        - S3WritePolicy:
+            BucketName: !Ref OutputBucketName
+
+  HealthFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers/health.handler
+      CodeUri: dist/
+      Description: Health check
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AnalysisApi
+            Path: /health
+            Method: GET
+            Auth:
+              Authorizer: NONE
+
+# ─── Outputs ──────────────────────────────────────────────────────────────────
+
+Outputs:
+  ApiEndpoint:
+    Description: API Gateway base URL
+    Value: !Sub 'https://${AnalysisApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+  StateMachineArn:
+    Value: !Ref AnalysisPipeline
+  AnalysisQueueUrl:
+    Value: !Ref AnalysisQueue

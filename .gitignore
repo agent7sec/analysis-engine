@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.env.local
+*.zip
+coverage/
+.aws-sam/
+samconfig.toml
