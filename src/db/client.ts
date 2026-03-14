@@ -25,7 +25,13 @@ import { config } from '../config.js';
 const clientConfig: DynamoDBClientConfig = {
     region: config.aws.region,
     ...(config.aws.endpoint
-        ? { endpoint: config.aws.endpoint }
+        ? {
+            endpoint: config.aws.endpoint,
+            credentials: {
+                accessKeyId: 'test',
+                secretAccessKey: 'test',
+            },
+        }
         : {}),
 };
 

@@ -6,3 +6,6 @@ dist/
 coverage/
 .aws-sam/
 samconfig.toml
+proxy.log
+env.json
+dist.*/

@@ -57,7 +57,7 @@ export const handler = async (event: SQSEvent): Promise<SQSBatchResponse> => {
                 }),
             );
 
-            await updateAnalysisStatus(msg.analysisId, 'ANALYZING', {
+            await updateAnalysisStatus(msg.userId, msg.analysisId, 'ANALYZING', {
                 sfnExecutionArn: executionArn,
             });
 

@@ -13,6 +13,14 @@ function optional(key: string, fallback: string): string {
     return process.env[key] ?? fallback;
 }
 
+// If using LocalStack (AWS_ENDPOINT set), force credentials to dummy values and unset the session token
+// so SAM CLI doesn't leak its host credentials causing UnrecognizedClientException
+if (process.env.AWS_ENDPOINT) {
+    process.env.AWS_ACCESS_KEY_ID = 'test';
+    process.env.AWS_SECRET_ACCESS_KEY = 'test';
+    delete process.env.AWS_SESSION_TOKEN;
+}
+
 export const config = {
     env: optional('NODE_ENV', 'development'),
     logLevel: optional('LOG_LEVEL', 'info'),

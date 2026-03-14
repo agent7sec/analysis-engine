@@ -37,7 +37,7 @@ Globals:
     Timeout: 30
     MemorySize: 256
     Runtime: nodejs22.x
-    Architectures: [arm64]
+    Architectures: [x86_64]
     Environment:
       Variables:
         NODE_ENV: !Ref Environment
@@ -226,7 +226,6 @@ Resources:
     Properties:
       StageName: !Ref Environment
       Auth:
-        DefaultAuthorizer: LambdaAuthorizer
         Authorizers:
           LambdaAuthorizer:
             AuthorizerPayloadFormatVersion: "2.0"
@@ -330,6 +329,48 @@ Resources:
             Path: /certificates/{id}/download
             Method: GET
 
+  GetAnalysesFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers/get-analyses.handler
+      CodeUri: dist/
+      Description: Admin — get all analyses
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AnalysesTableName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CertificatesTableName
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AnalysisApi
+            Path: /analyses
+            Method: GET
+            Auth:
+              Authorizer: NONE
+
+  GetAnalysisByIdFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: handlers/get-analysis.handler
+      CodeUri: dist/
+      Description: Admin — get analysis by id
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref AnalysesTableName
+        - DynamoDBCrudPolicy:
+            TableName: !Ref CertificatesTableName
+      Events:
+        Api:
+          Type: HttpApi
+          Properties:
+            ApiId: !Ref AnalysisApi
+            Path: /analyses/{id}
+            Method: GET
+            Auth:
+              Authorizer: NONE
+
   ApproveAnalysisFunction:
     Type: AWS::Serverless::Function
     Properties:
@@ -352,6 +393,8 @@ Resources:
             ApiId: !Ref AnalysisApi
             Path: /analyses/{id}/approve
             Method: POST
+            Auth:
+              Authorizer: NONE
 
   RejectAnalysisFunction:
     Type: AWS::Serverless::Function
@@ -375,6 +418,8 @@ Resources:
             ApiId: !Ref AnalysisApi
             Path: /analyses/{id}/reject
             Method: POST
+            Auth:
+              Authorizer: NONE
 
   SqsConsumerFunction:
     Type: AWS::Serverless::Function

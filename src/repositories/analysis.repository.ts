@@ -15,6 +15,7 @@ import {
     PutCommand,
     UpdateCommand,
     QueryCommand,
+    ScanCommand,
 } from '../db/client.js';
 import { config } from '../config.js';
 
@@ -129,6 +130,21 @@ export async function listPendingApproval(): Promise<Analysis[]> {
         }),
     );
     return (res.Items ?? []) as Analysis[];
+}
+
+export async function listAllAnalysesAdmin(): Promise<Analysis[]> {
+    // Note: In a production app, scanning an entire table is an anti-pattern.
+    // However, it's sufficient for this MVP/dashboard context until the dataset grows.
+    // Then we would add a GSI where PK is a static string like "TYPE#ANALYSIS"
+    // or use ElasticSearch/OpenSearch.
+    const res = await ddb.send(
+        new ScanCommand({
+            TableName: TABLE(),
+        }),
+    );
+    // Filter out rows that are not analyses (e.g. certificates if they were in the same table, though they aren't here)
+    const items = (res.Items ?? []) as (Analysis & { SK?: string })[];
+    return items.filter((item) => item.SK?.startsWith('ANALYSIS#')).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 }
 
 export interface UpdateAnalysisInput {
