@@ -35,6 +35,10 @@ export const config = {
         processingBucket: required('S3_PROCESSING_BUCKET'),
         quarantineBucket: required('S3_QUARANTINE_BUCKET'),
         outputBucket: required('S3_OUTPUT_BUCKET'),
+        // When running with LocalStack the presigned URL contains the Docker-internal
+        // hostname (e.g. localstack:4566). Set S3_PUBLIC_URL to the browser-accessible
+        // address (e.g. http://localhost:4566) so browsers can actually reach it.
+        publicUrl: process.env['S3_PUBLIC_URL'],
     },
 
     sqs: {

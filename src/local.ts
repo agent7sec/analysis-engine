@@ -65,6 +65,7 @@ app.post('/analyses/:id/approve', wrap(approveHandler));
 app.post('/analyses/:id/reject', wrap(rejectHandler));
 app.post('/uploads/presigned-url', wrap(presignedUrlHandler));
 app.post('/uploads/complete', wrap(uploadCompleteHandler));
+app.get('/health', (req, res) => res.json({ status: 'ok' }));
 
 app.listen(3000, () => {
     console.log('Local dev server running on http://localhost:3000');

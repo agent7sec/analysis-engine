@@ -49,9 +49,16 @@ export const handler = async (event: Event): Promise<APIGatewayProxyResultV2> =>
 
         const expiresAt = new Date(Date.now() + config.presignedUrl.uploadTtl * 1000).toISOString();
 
+        // When running locally with LocalStack, the presigned URL embeds the
+        // Docker-internal hostname (e.g. http://localstack:4566). The browser
+        // cannot resolve that name — rewrite it to the publicly accessible URL.
+        const publicUploadUrl = config.s3.publicUrl
+            ? uploadUrl.replace(config.aws.endpoint!, config.s3.publicUrl)
+            : uploadUrl;
+
         logger.info('presigned-url.created', { analysisId: analysis.analysisId, fileKey, userId, tenantId });
 
-        return ok({ upload_url: uploadUrl, file_key: fileKey, analysis_id: analysis.analysisId, expires_at: expiresAt });
+        return ok({ upload_url: publicUploadUrl, file_key: fileKey, analysis_id: analysis.analysisId, expires_at: expiresAt });
     } catch (err) {
         logger.error('presigned-url.error', { err });
         return internalError();
