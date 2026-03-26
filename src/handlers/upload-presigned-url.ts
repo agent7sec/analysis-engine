@@ -33,7 +33,7 @@ export const handler = async (event: Event): Promise<APIGatewayProxyResultV2> =>
         if (!body.file_name) return badRequest('file_name is required');
         if (!body.file_name.endsWith('.zip')) return badRequest('Only .zip files are accepted');
 
-        const analysis = await createAnalysis({ tenantId, userId, s3Key: '', fileName: body.file_name });
+        const analysis = await createAnalysis({ tenantId, userId, s3Key: '', fileName: body.file_name, initialStatus: 'VERIFYING' });
 
         const fileKey = `${tenantId}/${analysis.analysisId}/${body.file_name}`;
         const uploadUrl = await getSignedUrl(

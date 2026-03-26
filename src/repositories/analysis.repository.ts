@@ -22,6 +22,7 @@ import { config } from '../config.js';
 const TABLE = () => config.dynamo.analysesTable;
 
 export type AnalysisStatus =
+    | 'UPLOADED'
     | 'VERIFYING'
     | 'ANALYZING'
     | 'PENDING_APPROVAL'
@@ -36,6 +37,8 @@ export interface Analysis {
     userId: string;
     s3Key: string;
     fileName: string;
+    fileSize?: number;
+    fileHash?: string;
     status: AnalysisStatus;
     sfnExecutionArn?: string;
     sfnTaskToken?: string;
@@ -52,6 +55,10 @@ export interface CreateAnalysisInput {
     userId: string;
     s3Key: string;
     fileName: string;
+    fileSize?: number;
+    fileHash?: string;
+    /** Override initial status; defaults to 'UPLOADED' */
+    initialStatus?: AnalysisStatus;
 }
 
 export async function createAnalysis(input: CreateAnalysisInput): Promise<Analysis> {
@@ -66,7 +73,9 @@ export async function createAnalysis(input: CreateAnalysisInput): Promise<Analys
         userId: input.userId,
         s3Key: input.s3Key,
         fileName: input.fileName,
-        status: 'VERIFYING',
+        fileSize: input.fileSize,
+        fileHash: input.fileHash,
+        status: input.initialStatus ?? 'UPLOADED',
         createdAt: now,
         updatedAt: now,
     };

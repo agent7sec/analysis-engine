@@ -21,6 +21,7 @@ process.env.AWS_SECRET_ACCESS_KEY = 'test';
 
 import { handler as getAnalyses } from './handlers/get-analyses.js';
 import { handler as getAnalysis } from './handlers/get-analysis.js';
+import { handler as createAnalysisHandler } from './handlers/create-analysis.js';
 import { approveHandler, rejectHandler } from './handlers/hitl-approval.js';
 import { handler as presignedUrlHandler } from './handlers/upload-presigned-url.js';
 import { handler as uploadCompleteHandler } from './handlers/upload-complete.js';
@@ -61,11 +62,12 @@ const wrap = (handler: any) => async (req: express.Request, res: express.Respons
 
 app.get('/analyses', wrap(getAnalyses));
 app.get('/analyses/:id', wrap(getAnalysis));
+app.post('/analyses', wrap(createAnalysisHandler));
 app.post('/analyses/:id/approve', wrap(approveHandler));
 app.post('/analyses/:id/reject', wrap(rejectHandler));
 app.post('/uploads/presigned-url', wrap(presignedUrlHandler));
 app.post('/uploads/complete', wrap(uploadCompleteHandler));
-app.get('/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/health', (_req, res) => res.json({ status: 'ok' }));
 
 app.listen(3000, () => {
     console.log('Local dev server running on http://localhost:3000');
